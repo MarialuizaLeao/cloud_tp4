@@ -53,15 +53,9 @@ def merge_delta_table(spark, new_data, target_path, join_condition, update_colum
 def update_silver_layer(spark, silver_output_path, playlist_v2_df, tracks_v2_df):
     start_time = time.time()
 
-    new_song_silver_df = tracks_v2_df.select("track_name", "track_uri", "duration_ms", "album_uri", "artist_uri").distinct().dropDuplicates(["track_uri"])
-    new_album_silver_df = tracks_v2_df.select("album_uri", "album_name", "artist_uri").distinct().dropDuplicates(["album_uri"])
-    new_artist_silver_df = tracks_v2_df.select("artist_uri", "artist_name").distinct().dropDuplicates(["artist_uri"])
     new_playlist_silver_df = playlist_v2_df.select(col("pid").alias("playlist_id"), "name", "collaborative", "description").dropDuplicates(["playlist_id"])
     new_playlist_tracks_silver_df = tracks_v2_df.select(col("pid").alias("playlist_id"), "track_uri", "album_uri", "artist_uri", "pos", "duration_ms").dropDuplicates(["playlist_id", "track_uri"])
-
-    merge_delta_table(spark, new_song_silver_df, f"{silver_output_path}/songs", "target.track_uri = source.track_uri", ["track_name", "track_uri", "duration_ms", "album_uri", "artist_uri"])
-    merge_delta_table(spark, new_album_silver_df, f"{silver_output_path}/albums", "target.album_uri = source.album_uri", ["album_uri", "album_name", "artist_uri"])
-    merge_delta_table(spark, new_artist_silver_df, f"{silver_output_path}/artists", "target.artist_uri = source.artist_uri", ["artist_uri", "artist_name"])
+    
     merge_delta_table(spark, new_playlist_silver_df, f"{silver_output_path}/playlists", "target.playlist_id = source.playlist_id", ["playlist_id", "name", "collaborative", "description"])
     merge_delta_table(spark, new_playlist_tracks_silver_df, f"{silver_output_path}/playlist_tracks", "target.playlist_id = source.playlist_id AND target.track_uri = source.track_uri", ["playlist_id", "track_uri", "album_uri", "artist_uri", "pos", "duration_ms"])
 
@@ -72,38 +66,19 @@ def update_gold_layer(spark, silver_output_path, gold_output_path):
     start_time = time.time()
 
     existing_playlist_tracks_df = spark.read.format("delta").load(f"{silver_output_path}/playlist_tracks")
-    existing_songs_df = spark.read.format("delta").load(f"{silver_output_path}/songs")
-    existing_albums_df = spark.read.format("delta").load(f"{silver_output_path}/albums")
-    existing_artists_df = spark.read.format("delta").load(f"{silver_output_path}/artists")
     existing_playlists_df = spark.read.format("delta").load(f"{silver_output_path}/playlists")
 
     # Aggregate to ensure unique records
     gold_playlist_df = existing_playlist_tracks_df.groupBy("playlist_id").agg(
         countDistinct("track_uri").alias("num_tracks"),
-        countDistinct("artist_uri").alias("num_artists"),
-        countDistinct("album_uri").alias("num_albums"),
         sum("duration_ms").alias("total_duration_ms")
     ).join(existing_playlists_df, "playlist_id", "inner").dropDuplicates(["playlist_id"])
-
-    gold_playlist_tracks_df = existing_playlist_tracks_df.join(
-        existing_songs_df, "track_uri", "inner"
-    ).join(
-        existing_albums_df, "album_uri", "inner"
-    ).join(
-        existing_artists_df, "artist_uri", "inner"
-    ).select("playlist_id", "pos", "track_name", "album_name", "artist_name").dropDuplicates(["playlist_id", "track_name"])
 
     # MERGE instead of overwrite
     merge_delta_table(
         spark, gold_playlist_df, f"{gold_output_path}/playlists",
         "target.playlist_id = source.playlist_id",
-        ["playlist_id", "num_tracks", "num_artists", "num_albums", "total_duration_ms", "name", "collaborative", "description"]
-    )
-
-    merge_delta_table(
-        spark, gold_playlist_tracks_df, f"{gold_output_path}/playlist_tracks",
-        "target.playlist_id = source.playlist_id AND target.track_name = source.track_name",
-        ["playlist_id", "pos", "track_name", "album_name", "artist_name"]
+        ["playlist_id", "total_duration_ms", "name", "collaborative", "description"]
     )
 
     return time.time() - start_time
@@ -123,7 +98,7 @@ def main():
         .config("spark.port.maxRetries", "50") \
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
         .config("spark.executor.instances", "2") \
-        .config("spark.executor.cores", "2") 
+        .config("spark.executor.cores", "2") \
         .config("spark.executor.memory", "1024M") \
         .getOrCreate()
     
